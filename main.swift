@@ -219,7 +219,8 @@ enum ChargeModel {
     static func historyMinutes(_ b: BatteryInfo) -> Int? {
         guard let pct = b.pct, pct < 100 else { return nil }
         let cur = min(9, pct / 10)
-        guard let histNow = PowerHistory.chargeRate(cur) else { return nil }
+        let ref = max(PowerHistory.chargePeakW, b.powerInW ?? 0)                 // this charger's power
+        guard let histNow = PowerHistory.chargeRate(cur, refW: ref) else { return nil }
         var scale = 1.0
         if cur < 8, let a = b.mA, a > 50, let mx = b.mAhMax {
             let liveNow = 60 * Double(mx) / (100 * Double(a))      // minutes per 1% at today's charging speed
@@ -228,7 +229,7 @@ enum ChargeModel {
         var m = 0.0
         for p in pct..<100 {
             let band = min(9, p / 10)
-            guard let r = PowerHistory.chargeRate(band) else { return nil }
+            guard let r = PowerHistory.chargeRate(band, refW: ref) else { return nil }
             m += band < 8 ? r * scale : r
         }
         return Int(m.rounded())
@@ -237,11 +238,17 @@ enum ChargeModel {
 
 // MARK: - Power history (macOS power log)
 
+/// One past charge: its peak power in (identifies the charger) and the time / % gained per 10% band.
+struct ChargeSession: Codable { var peak: Double; var t: [Double]; var d: [Double] }
+
 struct HistoryResult: Codable {
     var chargeMinutesPerPercent: [Double]   // per 10% band; -1 = not enough data
     var lidClosedWatts: Double?             // screen off, on battery, awake
     var lidClosedMinutes: Double
     var days: Double
+    var screenShareW: Double? = nil         // how much less the Mac draws once the screen is off (learned from lid closes)
+    var lidClosePairs: Int? = nil           // lid closes on battery with a usable before/after
+    var sessions: [ChargeSession]? = nil    // per-charge stats, to match past charges to today's charger
 }
 
 /// Learns from the power log macOS keeps on every Mac (readable without admin rights):
@@ -276,9 +283,26 @@ enum PowerHistory {
         }
     }
 
+    /// Peak power in during the current charge (set by the app), used to match past charges to this charger.
+    static var chargePeakW = 0.0
+
+    /// Minutes per 1% per band from past charges whose peak power in was at least 70% of this charger's.
+    /// Bands without such data use all history; -1 = no data.
+    static func curve(refW: Double) -> [Double] {
+        guard let r = result, r.chargeMinutesPerPercent.count == 10 else { return [] }
+        let all = r.chargeMinutesPerPercent
+        guard refW > 0, let ss = r.sessions, ss.contains(where: { $0.peak > 0 }) else { return all }
+        var t = [Double](repeating: 0, count: 10), d = t
+        for s in ss where s.peak >= 0.7 * refW && s.t.count == 10 && s.d.count == 10 {
+            for b in 0..<10 { t[b] += s.t[b]; d[b] += s.d[b] }
+        }
+        return (0..<10).map { d[$0] >= 3 ? t[$0] / 60 / d[$0] : all[$0] }
+    }
+
     /// Minutes per 1% for a band; a band without data borrows the nearest one, preferring the slower band above.
-    static func chargeRate(_ band: Int) -> Double? {
-        guard let m = result?.chargeMinutesPerPercent, m.count == 10 else { return nil }
+    static func chargeRate(_ band: Int, refW: Double = 0) -> Double? {
+        let m = curve(refW: refW)
+        guard m.count == 10 else { return nil }
         if m[band] > 0 { return m[band] }
         for k in 1..<10 {
             for c in [band + k, band - k] where (0..<10).contains(c) && m[c] > 0 { return m[c] }
@@ -286,9 +310,48 @@ enum PowerHistory {
         return nil
     }
 
-    static func compute() -> HistoryResult? {
+    /// Screen share assumed until at least 3 lid closes have been seen.
+    static let defaultScreenShare = 2.0
+
+    /// The current log plus macOS's older daily archives, unpacked once into the app's cache folder.
+    static func logFiles() -> [String] {
+        let fm = FileManager.default
+        var files: [String] = []
+        let archDir = "/private/var/db/powerlog/Library/BatteryLife/Archives"
+        if let cache = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("LidCaffeinate/powerlog") {
+            try? fm.createDirectory(at: cache, withIntermediateDirectories: true)
+            let archives = ((try? fm.contentsOfDirectory(atPath: archDir)) ?? []).filter { $0.hasSuffix(".PLSQL.gz") }.sorted()
+            let wanted = Set(archives.map { String($0.dropLast(3)) })
+            for name in (try? fm.contentsOfDirectory(atPath: cache.path)) ?? [] where !wanted.contains(name) {
+                try? fm.removeItem(at: cache.appendingPathComponent(name))       // macOS dropped that archive
+            }
+            for a in archives {
+                let out = cache.appendingPathComponent(String(a.dropLast(3)))
+                if !fm.fileExists(atPath: out.path), fm.createFile(atPath: out.path, contents: nil),
+                   let h = FileHandle(forWritingAtPath: out.path) {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/usr/bin/gunzip")
+                    p.arguments = ["-c", "\(archDir)/\(a)"]
+                    p.standardOutput = h
+                    p.standardError = FileHandle.nullDevice
+                    var ok = false
+                    if (try? p.run()) != nil { p.waitUntilExit(); ok = p.terminationStatus == 0 }
+                    try? h.close()
+                    if !ok { try? fm.removeItem(at: out) }
+                }
+                if fm.fileExists(atPath: out.path) { files.append(out.path) }
+            }
+        }
+        files.append(path)
+        return files
+    }
+
+    struct Row { var t: Double; var level: Double?; var charging, ext, full: Bool; var mA, mV, adapterW: Double? }
+
+    /// Reads one log; checks which tables and columns exist so it works across Macs and macOS versions.
+    static func read(_ file: String) -> (rows: [Row], backlight: [(Double, Int)])? {
         var db: OpaquePointer?
-        guard sqlite3_open_v2("file:\(path)?immutable=1", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
+        guard sqlite3_open_v2("file:\(file)?immutable=1", &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI, nil) == SQLITE_OK else {
             sqlite3_close(db); return nil
         }
         defer { sqlite3_close(db) }
@@ -302,29 +365,61 @@ enum PowerHistory {
         func num(_ s: OpaquePointer, _ i: Int32) -> Double? {
             sqlite3_column_type(s, i) == SQLITE_NULL ? nil : sqlite3_column_double(s, i)
         }
-
+        var cols = Set<String>()
+        _ = query("pragma table_info('PLBatteryAgent_EventBackward_Battery')") { s in
+            if let c = sqlite3_column_text(s, 1) { cols.insert(String(cString: c)) }
+        }
+        guard cols.contains("timestamp"), cols.contains("Level") else { return nil }
+        func col(_ names: [String], _ fallback: String) -> String { names.first(where: cols.contains) ?? fallback }
+        let sql = "select timestamp, Level, \(col(["IsCharging"], "0")), \(col(["ExternalConnected"], "0")), " +
+                  "\(col(["FullyCharged"], "0")), \(col(["InstantAmperage", "Amperage"], "NULL")), \(col(["Voltage"], "NULL")), " +
+                  "\(col(["AdapterPower"], "NULL")) " +
+                  "from PLBatteryAgent_EventBackward_Battery order by timestamp"
+        var rows: [Row] = []
+        guard query(sql, { s in
+            rows.append(Row(t: sqlite3_column_double(s, 0), level: num(s, 1), charging: sqlite3_column_int(s, 2) == 1,
+                            ext: sqlite3_column_int(s, 3) == 1, full: sqlite3_column_int(s, 4) == 1, mA: num(s, 5), mV: num(s, 6),
+                            adapterW: num(s, 7)))
+        }) else { return nil }
         var backlight: [(Double, Int)] = []
         _ = query("select timestamp, Active from PLDisplayAgent_EventPoint_Display where Block='Backlight' order by timestamp") { s in
             backlight.append((sqlite3_column_double(s, 0), Int(sqlite3_column_int(s, 1))))
         }
-        struct Row { var t: Double; var level: Double?; var charging, ext, full: Bool; var mA, mV: Double? }
-        var rows: [Row] = []
-        let ok = query("select timestamp, Level, IsCharging, ExternalConnected, FullyCharged, InstantAmperage, Voltage from PLBatteryAgent_EventBackward_Battery order by timestamp") { s in
-            rows.append(Row(t: sqlite3_column_double(s, 0), level: num(s, 1), charging: sqlite3_column_int(s, 2) == 1,
-                            ext: sqlite3_column_int(s, 3) == 1, full: sqlite3_column_int(s, 4) == 1, mA: num(s, 5), mV: num(s, 6)))
+        return (rows, backlight)
+    }
+
+    static func compute() -> HistoryResult? {
+        // merge all logs in time order, skipping overlap
+        var parts = logFiles().compactMap(read).filter { !$0.rows.isEmpty }
+        parts.sort { $0.rows[0].t < $1.rows[0].t }
+        var rows: [Row] = [], backlight: [(Double, Int)] = []
+        for p in parts {
+            let lastT = rows.last?.t ?? 0
+            rows += p.rows.filter { $0.t > lastT }
+            let lastB = backlight.last?.0 ?? 0
+            backlight += p.backlight.filter { $0.0 > lastB }
         }
-        guard ok, rows.count > 1 else { return nil }
+        guard rows.count > 1 else { return nil }
 
         var bandT = [Double](repeating: 0, count: 10), bandD = bandT
         var offSecs = 0.0, offWattSecs = 0.0, bi = -1
+        var sessions: [ChargeSession] = [], sessionOpen = false
+        let zeros = [Double](repeating: 0, count: 10)
         for i in 0..<(rows.count - 1) {
             let a = rows[i], b = rows[i + 1], dt = b.t - a.t
-            guard dt > 0, dt < 1800 else { continue }
-            // charging curve: all charging time per 10% band, including time sitting on the same %
-            if a.charging, a.ext, b.ext, !a.full, let l0 = a.level, let l1 = b.level, l0 < 100 {
-                let band = min(9, Int(l0 / 10))
-                bandT[band] += dt; bandD[band] += max(0, l1 - l0)
-            }
+            guard dt > 0, dt < 1800 else { sessionOpen = false; continue }
+            // charging curve: all charging time per 10% band, including time sitting on the same %,
+            // also kept per charging session with its peak power in, to match the charger later
+            if a.charging, a.ext {
+                if !sessionOpen { sessions.append(ChargeSession(peak: 0, t: zeros, d: zeros)); sessionOpen = true }
+                let k = sessions.count - 1
+                sessions[k].peak = max(sessions[k].peak, a.adapterW ?? 0)
+                if b.ext, !a.full, let l0 = a.level, let l1 = b.level, l0 < 100 {
+                    let band = min(9, Int(l0 / 10)), gain = max(0, l1 - l0)
+                    bandT[band] += dt; bandD[band] += gain
+                    sessions[k].t[band] += dt; sessions[k].d[band] += gain
+                }
+            } else { sessionOpen = false }
             // screen-off draw: on battery, awake (no sleep gap), backlight off for at least 2 minutes
             while bi + 1 < backlight.count && backlight[bi + 1].0 <= a.t { bi += 1 }
             if !a.ext, !b.ext, dt <= 300, bi >= 0, backlight[bi].1 == 0, a.t - backlight[bi].0 >= 120,
@@ -333,10 +428,39 @@ enum PowerHistory {
                 offSecs += dt
             }
         }
+
+        // screen share: draw in the 10 minutes before each lid close on battery, minus the draw after it
+        func avgW(_ from: Double, _ to: Double) -> (Double, Double) {
+            var lo = 0, hi = rows.count
+            while lo < hi { let m = (lo + hi) / 2; if rows[m].t < from { lo = m + 1 } else { hi = m } }
+            var ws = 0.0, secs = 0.0, i = lo
+            while i + 1 < rows.count, rows[i + 1].t <= to {
+                let a = rows[i], b = rows[i + 1], dt = b.t - a.t
+                if !a.ext, !b.ext, dt > 0, dt <= 300, let i0 = a.mA, let i1 = b.mA, let v0 = a.mV, let v1 = b.mV {
+                    ws += -(i0 * v0 + i1 * v1) / 2 / 1_000_000 * dt; secs += dt
+                }
+                i += 1
+            }
+            return (secs > 0 ? ws / secs : 0, secs)
+        }
+        var diffs: [Double] = []
+        for (k, e) in backlight.enumerated() where e.1 == 0 {
+            let on = backlight[(k + 1)...].first(where: { $0.1 == 1 })?.0 ?? e.0 + 1800
+            let before = avgW(e.0 - 600, e.0), after = avgW(e.0 + 120, min(on, e.0 + 3600))
+            if before.1 >= 120, after.1 >= 120 { diffs.append(before.0 - after.0) }
+        }
+        var share: Double? = nil
+        if diffs.count >= 3 {
+            let d = diffs.sorted(), m = d.count / 2
+            share = min(10, max(0, d.count % 2 == 1 ? d[m] : (d[m - 1] + d[m]) / 2))
+        }
+
         return HistoryResult(chargeMinutesPerPercent: (0..<10).map { bandD[$0] >= 3 ? bandT[$0] / 60 / bandD[$0] : -1 },
                              lidClosedWatts: offSecs >= 600 && offWattSecs > 0 ? offWattSecs / offSecs : nil,
                              lidClosedMinutes: offSecs / 60,
-                             days: (rows[rows.count - 1].t - rows[0].t) / 86400)
+                             days: (rows[rows.count - 1].t - rows[0].t) / 86400,
+                             screenShareW: share, lidClosePairs: diffs.count,
+                             sessions: sessions.filter { $0.d.reduce(0, +) > 0 })
     }
 }
 
@@ -699,6 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         battery = Power.battery()
         if battery.charging && !wasCharging { PowerHistory.refresh(force: true) { [weak self] in self?.updateIcon() } }
         wasCharging = battery.charging
+        PowerHistory.chargePeakW = battery.onAC && battery.charging ? max(PowerHistory.chargePeakW, battery.powerInW ?? 0) : 0
         PowerHistory.refresh { [weak self] in self?.updateIcon() }   // hourly
         learnDraw()
         let t = Settings.threshold
@@ -749,8 +874,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var openWatts: Double? {
         openSamples.isEmpty ? battery.watts : openSamples.map(\.1).reduce(0, +) / Double(openSamples.count)
     }
+    /// Lid-closed draw: what the Mac is using now minus the screen's share (background work keeps running
+    /// after the lid closes). Falls back to the history average, then to live learning.
     var closedWatts: Double? {
-        PowerHistory.result?.lidClosedWatts ?? (Settings.lidClosedWattsLearned > 0 ? Settings.lidClosedWattsLearned : nil)
+        if !battery.lidClosed, let open = openWatts, open > 0.5 {
+            return max(0.5, open - (PowerHistory.result?.screenShareW ?? PowerHistory.defaultScreenShare))
+        }
+        return PowerHistory.result?.lidClosedWatts ?? (Settings.lidClosedWattsLearned > 0 ? Settings.lidClosedWattsLearned : nil)
     }
 
     /// Minutes to `t` % at the lid-open or lid-closed rate. Lid-closed falls back to lid-open until learned.
@@ -1054,11 +1184,11 @@ final class LiveModel: ObservableObject {
 
     /// Where the lid-closed draw and the charging curve come from, for Settings.
     func applyHistoryNotes() {
-        if let h = PowerHistory.result, let w = h.lidClosedWatts {
-            closedNote = String(format: "%.1f W · from %.0f min of history", w, h.lidClosedMinutes)
-        } else if Settings.lidClosedWattsLearned > 0 {
-            closedNote = String(format: "%.1f W · learned live", Settings.lidClosedWattsLearned)
-        } else { closedNote = "Not learned yet" }
+        if let h = PowerHistory.result, let s = h.screenShareW {
+            closedNote = String(format: "Current draw − %.1f W screen · from %d lid closes", s, h.lidClosePairs ?? 0)
+        } else {
+            closedNote = String(format: "Current draw − %.0f W screen · default until learned", PowerHistory.defaultScreenShare)
+        }
         if let h = PowerHistory.result, h.chargeMinutesPerPercent.contains(where: { $0 > 0 }) {
             historyNote = h.days >= 1 ? "Learned from \(Int(h.days.rounded())) days of history"
                                       : "Learned from \(max(1, Int(h.days * 24))) hours of history"
@@ -1241,7 +1371,7 @@ struct MenuBarTab: View {
                 LabeledContent("Charging curve", value: model.historyNote)
                 Button("Refresh from History", action: actions.resetLearning)
             } header: { Text("Power Draw") } footer: {
-                footer("Learned from this Mac’s own power log and refreshed every hour: the power draw whenever the screen was off on battery, and how long each 1% took to charge.")
+                footer("Learned from this Mac’s own power history and refreshed every hour. Lid closed is your current draw minus the screen’s share, learned by comparing the draw before and after past lid closes on battery. The charging curve is how long each 1% took to charge.")
             }
         }
         .formStyle(.grouped)
@@ -1292,9 +1422,9 @@ struct HelpTab: View {
             topic("The menu-bar icon", "menubar.rectangle",
                   "Cup on the battery: keeping awake. Outlined cup: awake, but lid-close sleep isn’t allowed yet. Battery only: off, or released at your battery level.\n\nOn battery, the top row is the time until the release level and the bottom row is the time until empty. On power, the top row is the time you’d get if you unplugged now, and the bottom row is the time until full.")
             topic("What “learned” means", "brain",
-                  "Times are based on how much power your Mac actually uses, measured from the battery every 30 seconds. Each time is the energy left above the target level, divided by the average power draw.\n\nLid open: the average of the last 5 minutes, so it follows whatever you’re doing now. It’s measured on power too, so “if unplugged” times work.\n\nLid closed: learned from this Mac’s power log, as the average power draw whenever the screen was off on battery, skipping the first 2 minutes while the display and graphics wind down. It’s refreshed every hour. If there isn’t enough history yet, it’s learned live while the lid is closed. Until it’s learned, lid-closed rows use the lid-open rate, and ☾ appears once the lid-closed rate is in use.")
+                  "Times are based on how much power your Mac actually uses, measured from the battery every 30 seconds. Each time is the energy left above the target level, divided by the average power draw.\n\nLid open: the average of the last 5 minutes, so it follows whatever you’re doing now. It’s measured on power too, so “if unplugged” times work.\n\nLid closed: your current power draw minus the screen’s share, because background work keeps running after you close the lid. The screen’s share is learned from this Mac’s power history by comparing the draw before and after past lid closes on battery. Until there are 3 of them, it assumes 2 W. Until it’s learned, lid-closed rows use the lid-open rate, and ☾ appears once the lid-closed rate is in use.")
             topic("Time to full", "bolt",
-                  "While charging, the time to full is learned from this Mac’s own charging history in the macOS power log: how many minutes each 1% took at each level, so the slowdown near full is included. Below 80%, the speed is adjusted to today’s charger and load. Without history, macOS’s own estimate is used. The menu shows the charging power, the power coming in minus what the Mac is using, and macOS’s figure for comparison.")
+                  "While charging, the time to full is learned from this Mac’s own charging history in the macOS power log: how many minutes each 1% took at each level, using past charges with a similar charger, so the slowdown near full is included. Below 80%, the speed is adjusted to today’s charger and load. Without history, macOS’s own estimate is used. The menu shows the charging power, the power coming in minus what the Mac is using, and macOS’s figure for comparison.")
             topic("Network keep-alive", "wifi",
                   "The app pings a host at the interval you set, every 30 seconds by default. If two pings in a row fail, it joins your hotspot. Join the hotspot once from the Wi-Fi menu first so its password is saved.")
             topic("Safety", "checkmark.shield",
@@ -1360,7 +1490,8 @@ if CommandLine.arguments.contains("--battery") {   // debug: print the numbers b
     Settings.register()
     PowerHistory.result = PowerHistory.compute() ?? PowerHistory.result
     if let h = PowerHistory.result {
-        print(String(format: "history: %.1f days · screen-off draw %@ from %.0f min · charge min/%% per band %@", h.days,
+        print(String(format: "history: %.1f days · screen share %@ from %d lid closes · screen-off avg %@ from %.0f min · charge min/%% per band %@", h.days,
+                     h.screenShareW.map { String(format: "%.1f W", $0) } ?? "n/a", h.lidClosePairs ?? 0,
                      h.lidClosedWatts.map { String(format: "%.1f W", $0) } ?? "n/a", h.lidClosedMinutes,
                      h.chargeMinutesPerPercent.map { $0 > 0 ? String(format: "%.2f", $0) : "-" }.joined(separator: " ")))
     } else { print("history: power log not readable") }
@@ -1369,6 +1500,8 @@ if CommandLine.arguments.contains("--battery") {   // debug: print the numbers b
     print("watts now=\(b.watts.map { String(format: "%.1f", $0) } ?? "?")  energy to \(t)%=\(b.energyWh(downTo: t).map { String(format: "%.1f Wh", $0) } ?? "?")")
     print("to empty (system or fallback)=\(b.toEmptyMin ?? -1) min  to \(t)% now=\(Power.minutes(to: t, b) ?? -1) min")
     print("time to full: shown=\(b.toFullMin ?? -1) min  macOS=\(b.systemToFullMin ?? -1) min  power in=\(b.powerInW.map { String(format: "%.1f", $0) } ?? "?") W")
+    print("charger-matched curve (\(Int(b.powerInW ?? 0)) W, \(PowerHistory.result?.sessions?.count ?? 0) past charges): " +
+          PowerHistory.curve(refW: b.powerInW ?? 0).map { $0 > 0 ? String(format: "%.2f", $0) : "-" }.joined(separator: " "))
     let lw = Settings.lidClosedWattsLearned
     print("lid closed learned=\(String(format: "%.1f", lw)) W  to \(t)% lid closed=\(lw > 0 ? Power.minutes(to: t, b, watts: lw) ?? -1 : -1) min  to 0% lid closed=\(lw > 0 ? Power.minutes(to: 0, b, watts: lw) ?? -1 : -1) min")
     exit(0)

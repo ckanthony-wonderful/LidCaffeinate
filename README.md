@@ -43,15 +43,15 @@ Prefer to compile it yourself? See [Build it yourself](#build-it-yourself).
 
 ## Learning from your Mac
 
-macOS keeps a power log on every Mac. LidCaffeinate reads it, read-only and without admin rights, so its estimates fit your battery, charger and the way you work.
+macOS keeps a power log on every Mac, plus about a week of older daily archives. LidCaffeinate reads them, read-only and without admin rights, so its estimates fit your battery, charger and the way you work.
 
 | What | How it's learned |
 |---|---|
-| Lid-closed power draw | The average power whenever the screen was off on battery, skipping the first 2 minutes while the display winds down. |
-| Time to full | How many minutes each 1% took to charge in each 10% band, so the slowdown near full is included. Below 80% it's adjusted to today's charger and load. |
+| Lid-closed power draw | Your current power draw minus the screen's share, because background work keeps running after the lid closes. The screen's share is learned by comparing the draw before and after past lid closes on battery. Until there are 3 of them, it assumes 2 W. |
+| Time to full | How many minutes each 1% took to charge in each 10% band, so the slowdown near full is included. It uses past charges with a similar charger, recognised by their peak power in, and adjusts below 80% to today's load. |
 | Lid-open power draw | Live, as a rolling 5-minute average of the battery's measured draw. |
 
-The history is refreshed at launch, every hour, when charging starts and when the lid opens. Settings → Menu Bar shows where each number comes from, for example "17.8 W · from 46 min of history", with a Refresh from History button. On a new Mac with little history, the lid-closed draw is learned live while the lid is closed, and the time to full uses macOS's own estimate. The menu shows macOS's figure next to the learned one for comparison.
+The history is refreshed at launch, every hour, when charging starts and when the lid opens. Settings → Menu Bar shows where each number comes from, for example "Current draw − 1.5 W screen · from 4 lid closes", with a Refresh from History button. On a new Mac with little history, the screen's share starts at 2 W and the time to full uses macOS's own estimate. The menu shows macOS's figure next to the learned one for comparison.
 
 ## LidCaffeinate vs `caffeinate`
 
@@ -130,7 +130,7 @@ While a screen is kept on, your Mac doesn't lock itself, so anyone nearby could 
 - **Power assertions:** the same ones as `caffeinate -dims`, created with IOKit. The display assertion is held only while the lid is open, or when docked.
 - **Lid-close sleep:** `pmset -a disablesleep 1` while holding, `0` when released or on quit. A detached watchdog resets it if the app is force-quit or crashes.
 - **Battery:** IOKit power-source APIs, plus the `AppleSmartBattery` gauge for charge, voltage, current and system load.
-- **History:** the macOS power log at `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL`, opened read-only. Battery samples give the charging curve per 10% band, and backlight events mark screen-off time for the lid-closed draw. It's an undocumented file, so the app keeps its last result and falls back if a macOS update changes it.
+- **History:** the macOS power log at `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL`, opened read-only. Battery samples give the charging curve per 10% band, and backlight events mark screen-off time for the lid-closed draw. The older daily archives are unpacked once into the app's Caches folder and removed when macOS drops them. These are undocumented files, so the app checks which tables and columns exist, skips anything it can't read, keeps its last result, and falls back if a macOS update changes them.
 - **Lid state:** a power-management notification, backed up by a cheap registry check every 2 seconds.
 - **Settings:** stored with `UserDefaults` under the `com.anthony.lidcaffeinate` domain.
 
