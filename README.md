@@ -76,6 +76,13 @@ cd LidCaffeinate
 
 `./build.sh` on its own builds into `build/LidCaffeinate.app` without installing.
 
+## Tip: replace the built-in battery icon
+
+LidCaffeinate's menu-bar icon already shows your battery level and the time left, so you can hide macOS's own battery icon:
+
+- **macOS 26:** System Settings → Menu Bar → Battery → Don’t Show in Menu Bar
+- **macOS 13–15:** System Settings → Control Center → Battery → turn off Show in Menu Bar
+
 ## First launch: the one permission
 
 macOS always sleeps on lid close unless the system setting `SleepDisabled` is on, and changing it needs admin rights. On first launch LidCaffeinate asks once for your password and installs this single rule in `/etc/sudoers.d/lidcaffeinate`:
