@@ -34,7 +34,7 @@ Prefer to compile it yourself? See [Build it yourself](#build-it-yourself).
 - **Screen really off.** With the lid closed, the built-in display is put to sleep, so it saves power and nothing is lit inside the bag.
 - **Battery guard.** On battery, the hold is released at a level you choose, 45% by default. It comes back when you plug in. It can also put the Mac to sleep at that point.
 - **Time estimates in the menu bar.** The top row shows the time to your release level, the bottom row the time to empty. On power, they show what you'd get if you unplugged now, and the time to full.
-- **Learned power draw.** Estimates use the Mac's real power draw, measured from the battery gauge. The lid-open rate is a rolling 5-minute average. The lid-closed rate is learned while the lid is shut and kept between launches. Each row can use either one.
+- **Learns from your Mac's history.** Every Mac is different, so estimates come from this Mac's own macOS power log, read-only and without admin rights. The lid-closed draw is the average power whenever the screen was off on battery. The time to full uses how long each 1% actually took to charge, including the slowdown near full, adjusted to today's charger and load. The lid-open rate is a live 5-minute average. Everything refreshes hourly, and falls back to live learning or macOS's own estimate when there's no history yet.
 - **Network keep-alive.** Pings a host at an interval you set. If two pings in a row fail, it joins a fallback Wi-Fi network such as your phone's hotspot.
 - **Docked aware.** With an external display, that screen keeps working, and "Keep display awake" decides whether it stays on.
 - **Safe by design.** Quitting, a crash or a force-quit always turns lid-close sleep back on, thanks to a small watchdog process.
@@ -118,6 +118,7 @@ While a screen is kept on, your Mac doesn't lock itself, so anyone nearby could 
 - **Power assertions:** the same ones as `caffeinate -dims`, created with IOKit. The display assertion is held only while the lid is open, or when docked.
 - **Lid-close sleep:** `pmset -a disablesleep 1` while holding, `0` when released or on quit. A detached watchdog resets it if the app is force-quit or crashes.
 - **Battery:** IOKit power-source APIs, plus the `AppleSmartBattery` gauge for charge, voltage, current and system load.
+- **History:** the macOS power log at `/private/var/db/powerlog/Library/BatteryLife/CurrentPowerlog.PLSQL`, opened read-only. Battery samples give the charging curve per 10% band, and backlight events mark screen-off time for the lid-closed draw. It's an undocumented file, so the app keeps its last result and falls back if a macOS update changes it.
 - **Lid state:** a power-management notification, backed up by a cheap registry check every 2 seconds.
 - **Settings:** stored with `UserDefaults` under the `com.anthony.lidcaffeinate` domain.
 
