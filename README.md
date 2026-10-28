@@ -14,6 +14,20 @@
 
 Close the lid, put the MacBook in your bag, and long-running jobs, downloads, SSH sessions and agents keep going. Open the menu-bar icon to see how long the battery will last at your current power draw. Quit the app and normal sleep comes back.
 
+## Download
+
+**[⬇ Download LidCaffeinate.zip](https://github.com/ckanthony-wonderful/LidCaffeinate/releases/latest/download/LidCaffeinate.zip)**, universal for Apple Silicon and Intel, macOS 13 or later.
+
+1. Unzip it and drag **LidCaffeinate** into your Applications folder.
+2. The app isn’t notarized by Apple, so macOS blocks the first launch. Allow it once with this Terminal command:
+   ```sh
+   xattr -dr com.apple.quarantine /Applications/LidCaffeinate.app
+   ```
+   Or try to open it, then go to System Settings → Privacy & Security and click **Open Anyway**.
+3. Open LidCaffeinate. It asks for your password once, see [First launch](#first-launch-the-one-permission).
+
+Prefer to compile it yourself? See [Build it yourself](#build-it-yourself).
+
 ## Features
 
 - **Lid-closed, on battery.** Stays awake with the lid shut even without a charger or external display.
@@ -64,7 +78,7 @@ Menu-bar icon states:
 |---|---|---|---|
 | <img src="docs/menubar-holding-battery.png" height="40"> | <img src="docs/menubar-holding-charging.png" height="40"> | <img src="docs/menubar-off-battery.png" height="40"> | <img src="docs/menubar-released-low.png" height="40"> |
 
-## Install
+## Build it yourself
 
 Requirements: macOS 13 or later on a MacBook, and the Xcode Command Line Tools (`xcode-select --install`).
 
@@ -74,7 +88,7 @@ cd LidCaffeinate
 ./build.sh --install     # builds, copies to /Applications and launches
 ```
 
-`./build.sh` on its own builds into `build/LidCaffeinate.app` without installing.
+`./build.sh` on its own builds into `build/LidCaffeinate.app` without installing. `./build.sh --release` makes the universal zip that's attached to each release.
 
 ## Tip: replace the built-in battery icon
 
@@ -113,7 +127,7 @@ While a screen is kept on, your Mac doesn't lock itself, so anyone nearby could 
 |---|---|
 | `main.swift` | the whole app: AppKit menu bar plus a SwiftUI Settings window |
 | `Info.plist` | bundle metadata, including `LSUIElement` so there's no Dock icon |
-| `build.sh` | compiles with `swiftc`, assembles the bundle, ad-hoc signs, optional `--install` |
+| `build.sh` | compiles with `swiftc`, assembles the bundle, ad-hoc signs; `--install` or `--release` |
 | `icon/make_icon.swift` | draws the app icon from SF Symbols and writes `AppIcon.icns` |
 | `docs/` | README images |
 
