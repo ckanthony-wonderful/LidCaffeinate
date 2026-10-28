@@ -34,12 +34,24 @@ Prefer to compile it yourself? See [Build it yourself](#build-it-yourself).
 - **Screen really off.** With the lid closed, the built-in display is put to sleep, so it saves power and nothing is lit inside the bag.
 - **Battery guard.** On battery, the hold is released at a level you choose, 45% by default. It comes back when you plug in. It can also put the Mac to sleep at that point.
 - **Time estimates in the menu bar.** The top row shows the time to your release level, the bottom row the time to empty. On power, they show what you'd get if you unplugged now, and the time to full.
-- **Learns from your Mac's history.** Every Mac is different, so estimates come from this Mac's own macOS power log, read-only and without admin rights. The lid-closed draw is the average power whenever the screen was off on battery. The time to full uses how long each 1% actually took to charge, including the slowdown near full, adjusted to today's charger and load. The lid-open rate is a live 5-minute average. Everything refreshes hourly, and falls back to live learning or macOS's own estimate when there's no history yet.
+- **Learns from your Mac.** Every Mac is different, so the lid-closed power draw and the time to full are learned from this Mac's own history. See [Learning from your Mac](#learning-from-your-mac).
 - **Network keep-alive.** Pings a host at an interval you set. If two pings in a row fail, it joins a fallback Wi-Fi network such as your phone's hotspot.
 - **Docked aware.** With an external display, that screen keeps working, and "Keep display awake" decides whether it stays on.
 - **Safe by design.** Quitting, a crash or a force-quit always turns lid-close sleep back on, thanks to a small watchdog process.
 - **Native UI.** A menu with quick switches, and a standard Settings window with General, Menu Bar, Network, Help and About tabs.
 - **Light.** About 0% CPU at idle and around 27 MB of memory.
+
+## Learning from your Mac
+
+macOS keeps a power log on every Mac. LidCaffeinate reads it, read-only and without admin rights, so its estimates fit your battery, charger and the way you work.
+
+| What | How it's learned |
+|---|---|
+| Lid-closed power draw | The average power whenever the screen was off on battery, skipping the first 2 minutes while the display winds down. |
+| Time to full | How many minutes each 1% took to charge in each 10% band, so the slowdown near full is included. Below 80% it's adjusted to today's charger and load. |
+| Lid-open power draw | Live, as a rolling 5-minute average of the battery's measured draw. |
+
+The history is refreshed at launch, every hour, when charging starts and when the lid opens. Settings → Menu Bar shows where each number comes from, for example "17.8 W · from 46 min of history", with a Refresh from History button. On a new Mac with little history, the lid-closed draw is learned live while the lid is closed, and the time to full uses macOS's own estimate. The menu shows macOS's figure next to the learned one for comparison.
 
 ## LidCaffeinate vs `caffeinate`
 
@@ -52,7 +64,7 @@ Prefer to compile it yourself? See [Build it yourself](#build-it-yourself).
 | Stay awake with the lid closed on power, no external display | ❌ | ✅ |
 | Turn the screen off when the lid closes | — | ✅ |
 | Release at a battery level, re-arm on power | ❌ | ✅ |
-| Battery time estimates from real power draw | ❌ | ✅ |
+| Battery and charging time learned from your Mac's own history | ❌ | ✅ |
 | Keep the network up, fall back to a hotspot | ❌ | ✅ |
 | Restores normal sleep when stopped or crashed | ✅ | ✅ |
 | Needs admin rights | No | Once, for a single scoped rule |
