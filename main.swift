@@ -719,15 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduleNetTimer()
         updateIcon()
         live.nowW = battery.watts; live.openW = openWatts; live.closedW = closedWatts
-        if let h = PowerHistory.result, let w = h.lidClosedWatts {
-            live.closedNote = String(format: "%.1f W · from %.0f min of history", w, h.lidClosedMinutes)
-        } else if Settings.lidClosedWattsLearned > 0 {
-            live.closedNote = String(format: "%.1f W · learned live", Settings.lidClosedWattsLearned)
-        } else { live.closedNote = "Not learned yet" }
-        if let h = PowerHistory.result, h.chargeMinutesPerPercent.contains(where: { $0 > 0 }) {
-            live.historyNote = h.days >= 1 ? "Learned from \(Int(h.days.rounded())) days of history"
-                                           : "Learned from \(max(1, Int(h.days * 24))) hours of history"
-        } else { live.historyNote = "Not available, using macOS" }
+        live.applyHistoryNotes()
         live.permission = Permission.installed
         live.onAC = battery.onAC; live.docked = Self.externalDisplayActive()
     }
@@ -1059,6 +1051,19 @@ final class LiveModel: ObservableObject {
     @Published var docked = false
     @Published var closedNote = "Not learned yet"
     @Published var historyNote = "Not available, using macOS"
+
+    /// Where the lid-closed draw and the charging curve come from, for Settings.
+    func applyHistoryNotes() {
+        if let h = PowerHistory.result, let w = h.lidClosedWatts {
+            closedNote = String(format: "%.1f W · from %.0f min of history", w, h.lidClosedMinutes)
+        } else if Settings.lidClosedWattsLearned > 0 {
+            closedNote = String(format: "%.1f W · learned live", Settings.lidClosedWattsLearned)
+        } else { closedNote = "Not learned yet" }
+        if let h = PowerHistory.result, h.chargeMinutesPerPercent.contains(where: { $0 > 0 }) {
+            historyNote = h.days >= 1 ? "Learned from \(Int(h.days.rounded())) days of history"
+                                      : "Learned from \(max(1, Int(h.days * 24))) hours of history"
+        } else { historyNote = "Not available, using macOS" }
+    }
 }
 
 struct SettingsActions {
@@ -1333,7 +1338,9 @@ if let i = CommandLine.arguments.firstIndex(of: "--render-settings"), i + 1 < Co
     // debug: render every Settings tab offscreen to <dir>/settings-<tab>.png
     Settings.register()
     NSApplication.shared.setActivationPolicy(.prohibited)
+    PowerHistory.result = PowerHistory.compute() ?? PowerHistory.result
     let model = LiveModel(); model.nowW = 23.4; model.openW = 18.2; model.onAC = false; model.docked = false
+    model.applyHistoryNotes()
     let acts = SettingsActions(grant: {}, remove: {}, resetLearning: {}, setLogin: { _ in })
     for t in SettingsTab.allCases {
         let v = NSHostingView(rootView: settingsView(t, model: model, actions: acts))
